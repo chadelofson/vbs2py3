@@ -1,0 +1,596 @@
+
+
+Set g_fso = CreateObject("Scripting.FileSystemObject")
+Set g_shell = CreateObject("WScript.Shell")
+
+g_strMyDocs = g_shell.SpecialFolders("MyDocuments")
+
+' ##hosts.txt and ##commands.txt files are located in the current user's
+' ##MyDocuments folder.  Hard-code to different paths as your needs dictate.
+g_strHostsFile    = "C:\Users\ryan.bell\Dropbox\Work\Dimension Data\TxDOT\LAN\Configs\##hosts.txt"
+g_strCommandsFile = "C:\Users\ryan.bell\Dropbox\Work\Dimension Data\TxDOT\LAN\Configs\##commands.txt"
+
+' Template used for formulating the name of the results file in which the
+' command output will be saved.  You can choose to arrange the various
+' components (i.e. "IPADDRESS", "COMMAND", "YYYY", "MM", "DD", "hh", etc.) of
+' the log file name into whatever order you want it to be.
+g_strLogFileTemplate = _
+    "C:\Users\ryan.bell\Dropbox\Work\Dimension Data\TxDOT\LAN\Scripting\SecureCRT Logs\IPADDRESS##-MM-DD-YYYY.txt"
+
+' Comment character allows for comments to exist in either the host.txt or
+' commands.txt files. Lines beginning with this character will be ignored.
+g_strComment = "#"
+
+' If connecting through a proxy is required, comment out the second statement
+' below, and modify the first statement below to match the name of the firewall
+' through which you're connecting (as defined in global options within
+' SecureCRT)
+g_strFirewall = " /FIREWALL=myFireWallName "
+g_strFirewall = ""
+
+' Username for authenticating to the remote system
+g_strUsername = "ASMIT2-C"
+' Password for authenticating to the remote system
+g_strPassword = "Monday17"
+
+' Global variable for housing details of any errors that might be encountered
+g_strError = ""
+
+' Constants used for reading and writing files.
+Const ForReading   = 1
+Const ForWriting   = 2
+Const ForAppending = 8
+
+Dim g_objNewTab, g_strHost
+
+' Call the main subroutine named "MainSub"
+MainSub
+
+'-------------------------------------------------------------------------------
+Sub MainSub()
+
+    ' Create arrays in which lines from the hosts and commands files will be
+    ' stored.
+    Dim vHosts(), vCommands()
+    ' Create variables for storing information about the lines read from the
+    ' file
+    Dim nHostCount, nCommandCount, nCommentLines
+    ' Call the ReadDataFromFile() function defined in this script.  It will
+    ' read in the hosts file and populate an array with non-comment lines that
+    ' will represent the hosts to which connections will be made later on.
+    If Not ReadDataFromFile(g_strHostsFile, _
+                            g_strComment, _
+                            vHosts, _
+                            nHostCount, _
+                            nCommentLines) Then
+        DisplayMessage "No hosts were found in file: " & vbcrlf & _
+            vbtab & g_strHostsFile
+        Exit Sub
+    End If
+    
+    ' Now call the ReadDataFromFile() function for the commands file.
+    If Not ReadDataFromFile(g_strCommandsFile, _
+                            g_strComment, _
+                            vCommands, _
+                            nCommandCount, _
+                            nCommentLines) Then
+        DisplayMessage "No commands were found in file: " & vbcrlf & _
+            vbtab & g_strCommandsFile
+        Exit Sub
+    End If
+
+    Dim strErrors, strSuccesses
+    
+    ' Before attempting any connections, ensure that the "Auth Prompts In 
+    ' Window" option in the Default session is already enabled.  If not, prompt
+    ' the user to have the script enable it automatically before continuing.
+    ' Before continuing on with the script, ensure that the session option
+    ' for handling authentication within the terminal window is enabled
+    Set objConfig = crt.OpenSessionConfiguration("Default")
+    bAuthInTerminal = objConfig.GetOption("Auth Prompts In Window")
+    If Not bAuthInTerminal Then
+        strMessage = _
+            "The 'Default' session (used for all ad hoc " & _
+            "connections) does not have the ""Display logon prompts in " & _
+            "terminal window"" option enabled, which is required for this " & _
+            "script to operate successfully." & vbcrlf & vbcrlf
+        If PromptYesNo(_
+            strMessage & _
+            "Would you like to have this script automatically enable this " & _
+            "option in the 'Default' session so that next time you run " & _
+            "this script, the option will already be enabled?") <> vbYes Then
+            Exit Sub
+        End If
+        
+        ' User answered prompt with Yes, so let's set the option and save
+        objConfig.SetOption "Auth Prompts In Window", True
+        objConfig.Save
+    End If
+
+    
+    ' Iterate through each element of our vHosts array...
+    For nIndex = 0 To nHostCount - 1
+        ' Arrays are indexed starting at 0 (zero)
+        
+        ' Store the current host in a variable so we don't have to remember
+        ' what "vHosts(nIndex)" means.
+        g_strHost = vHosts(nIndex)
+        
+        ' Exit the loop if the host name is empty (this means we've
+        ' reached the end of our array
+        If g_strHost = "" Then Exit For
+
+        ' Build up a string containing connection information and options.
+        ' /ACCEPTHOSTKEYS should only be used if you suspect that there might be
+        ' hosts in the hosts.txt file to which you haven't connected before, and
+        ' therefore SecureCRT hasn't saved out the SSH2 server's host key.
+		'
+        '   A best practice would be to connect manually to each device, 
+        '   verifying each server's hostkey individually before running this
+        '   script.
+        '
+        ' If you want to authenticate with publickey authentication instead of
+        ' password, in the assignment of strConnectString below, replace:
+        '   " /AUTH password,keyboard-interactive /PASSWORD " & g_strPassword & _ 
+		' with:
+        '   " /AUTH publickey /I ""full_path_to_private_key_file"" " & _
+        strConnectString = _
+            g_strFirewall & _
+            " /TELNET " & _
+            " " & g_strHost
+        
+        ' Call the Connect() function defined below in this script.  It handles
+        ' the connection process, returning success/fail.
+        If Not Connect(strConnectString) Then
+            strErrors = strErrors & vbcrlf & _
+                vbtab & "Failed to connect to " & g_strHost & _
+                        ": " & g_strError
+        Else
+            ' If we get to this point in the script, we're connected (including
+            ' authentication) to a remote host successfully.
+            g_objNewTab.Screen.Synchronous = True
+            g_objNewTab.Screen.IgnoreEscape = True
+            
+            ' Once the screen contents have stopped changing (polling every
+            ' 350 milliseconds), we'll assume it's safe to start interacting
+            ' with the remote system.
+            If Not WaitForScreenContentsToStopChanging(700) Then
+                strErrors = strErrors & vbcrlf & _
+                    "Error: Failed to detect remote ready status for host: " & _
+                    g_strHost & ".  " & g_strError
+            Else
+                ' Get the shell prompt so that we can know what to look for when
+                ' determining if the command is completed. Won't work if the
+                ' prompt is dynamic (e.g. changes according to current working
+                ' folder, etc)
+                nRow = g_objNewTab.Screen.CurrentRow
+                strPrompt = g_objNewTab.screen.Get(nRow, _
+                                           0, _
+                                           nRow, _
+                                           g_objNewTab.Screen.CurrentColumn - 1)
+                strPrompt = Trim(strPrompt)
+                
+                ' Send each command one-by-one to the remote system:
+                For Each strCommand In vCommands
+                    crt.Screen.Send vbCRLF
+					crt.Screen.WaitForString vbLF
+					strHostname = crt.Screen.Readstring("#")
+					strOrigPrompt = strPrompt
+					strConfigPrompt = ")#"
+					strPrivPrompt = "#"
+					
+					If strCommand = "configure terminal" Then strPrompt = strConfigPrompt
+					If strCommand = "end" Then strPrompt = strPrivPrompt
+					If strCommand = "exit" Then strPrompt = strPtivPrompt
+                    If strCommand = "" Then Exit For
+                    
+                    ' Send the command text to the remote
+                    g_objNewTab.Screen.Send strCommand & vbcr
+
+                    ' Wait for the command to be echo'd back to us.
+                    g_objNewTab.Screen.WaitForString strCommand
+                    
+                    ' Since we don't know if we're connecting to a cisco switch or a
+                    ' linux box or whatever, let's look for either a Carriage Return
+                    ' (CR) or a Line Feed (LF) character in any order.
+                    vWaitFors = Array(vbcr, vblf)
+                    bFoundEOLMarker = False
+                    Do
+                        ' Call WaitForStrings, passing in the array of possible
+                        ' matches.
+                        g_objNewTab.Screen.WaitForStrings vWaitFors, 1
+                        
+                        ' Determine what to do based on what was found)
+                        Select Case g_objNewTab.Screen.MatchIndex
+                            Case 0 ' Timed out
+                                Exit Do
+                            
+                            Case 1,2 ' found either CR or LF
+                                ' Check to see if we've already seen the other
+                                ' EOL Marker
+                                If bFoundEOLMarker Then Exit Do
+                                
+                                ' If this is the first time we've been through
+                                ' here, indicate as much, and then loop back up
+                                ' to the  top and try to find the other EOL
+                                ' marker.
+                                bFoundEOLMarker = True
+                        End Select
+                    Loop
+
+                    ' Now that we know the command has been sent to the remote
+                    ' system, we'll begin the process of capturing the output of
+                    ' the command.
+                    
+                    Dim strResult
+                    ' Use the ReadString() method to get the text displayed
+                    ' while the command was runnning.  Note also that the 
+					' ReadString() method captures escape sequences sent from
+					' the remote machine as well as displayed text.  As
+					' mentioned earlier in comments above, if you want to
+					' suppress escape sequences from being captured, set the
+					' Screen.IgnoreEscape property = True.
+                    strResult = g_objNewTab.Screen.ReadString(strPrompt)
+                    
+                    ' Dim objFile, strLogFile
+                    
+                    ' Set the log file name based on the remote host's IP
+                    ' address and the command we're currently running.  We also
+                    ' add a  date/timestamp to help make each filename unique
+                    ' over time.
+                    strLogFile = Replace( _
+                        g_strLogFileTemplate, _
+                        "IPADDRESS", _
+						strHostname)
+
+                    ' Replace any illegal characters that might have been
+                    ' introduced by the command we're running (e.g. if the
+                    ' command had a path or a pipe in it)
+                    ' strCleanCmd = Replace(strCommand, "/", "[SLASH]")
+                    ' strCleanCmd = Replace(strCleanCmd, "\", "[BKSLASH]")
+                    ' strCleanCmd = Replace(strCleanCmd, ":", "[COLON]")
+                    ' strCleanCmd = Replace(strCleanCmd, "*", "[STAR]")
+                    ' strCleanCmd = Replace(strCleanCmd, "?", "[QUESTION]")
+                    ' strCleanCmd = Replace(strCleanCmd, """", "[QUOTE]")
+                    ' strCleanCmd = Replace(strCleanCmd, "<", "[LT]")
+                    ' strCleanCmd = Replace(strCleanCmd, ">", "[GT]")
+                    ' strCleanCmd = Replace(strCleanCmd, "|", "[PIPE]")
+                    
+                    ' strLogFile = Replace(strLogFile, "COMMAND", strCleanCmd)
+                    
+                    ' Add Time stats to the log file name based on the Template
+                    ' defined by the script author.
+                    strLogFile = Replace(strLogFile, "YYYY", Year(Date))
+                    strLogFile = Replace(strLogFile, "-MM-", "-" & NN(Month(Date)) & "-")
+                    strLogFile = Replace(strLogFile, "-DD-", "-" & NN(Day(Date)) & "-")
+                    'strLogFile = Replace(strLogFile, "-hh'", "-" & NN(Hour(Time)) & "'")
+                    'strLogFile = Replace(strLogFile, "'mm'", "'" & NN(Minute(Time)) & "'")
+                    'strLogFile = Replace(strLogFile, "'ss", "'" & NN(Second(Time)))
+                                    
+                    Set objFile = g_fso.OpenTextFile(strLogFile, ForAppending, True)
+
+                    ' If you want the command logged along with the results,
+                    ' uncomment the next two lines
+					objFile.WriteLine "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+                    objFile.WriteLine "Results of command """ & strCommand & _
+                    """ sent to " & strHostname & "- IP: " & g_strHost & ":"
+					objFile.WriteLine "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+					
+
+                    ' Write out the results of the command and a separator
+                    objFile.WriteLine strResult
+                    objFile.WriteLine "#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#"
+					objFile.WriteLine "#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#*#"
+					
+                    ' Close the log file
+                    objFile.Close
+                Next
+                ' Now disconnect from the current machine before connecting to
+                ' the next machine
+                Do
+                    g_objNewTab.Session.Disconnect
+                    crt.Sleep 100
+                Loop While g_objNewTab.Session.Connected
+                
+                strSuccesses = strSuccesses & vbcrlf & g_strHost
+            End If ' WaitForScreenContentsToStopChanging()
+        End If ' Connect()
+        
+    Next
+
+    strMsg = "Commands were sent to the following hosts: " & _
+        vbcrlf & strSuccesses
+        
+    If strErrors <> "" Then
+        strMsg = strMsg & vbcrlf & vbcrlf & _
+        "Errors were encountered connecting to these hosts:" & _
+        vbcrlf & strErrors
+    End If
+    
+    DisplayMessage strMsg
+End Sub
+
+
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Function ReadDataFromFile(strFile, _
+                          strComment, _
+                          ByRef vLines, _
+                          ByRef nLineCount, _
+                          ByRef nCommentLines)
+' Returns True if the file was found.
+'        strFile: IN  parameter specifying full path to data file.
+'     strComment: IN  parameter specifying string that preceded
+'                    by 0 or more space characters will indicate
+'                    that the line should be ignored.
+'        vLines: OUT parameter (destructive) containing array
+'                    of lines read in from file.
+'    nLineCount: OUT parameter (destructive) indicating number
+'                    of lines read in from file.
+' nCommentLines: OUT parameter (destructive) indicating number
+'                    of comment/blank lines found
+'
+'
+    ' Check to see if the file exists... if not, bail early.
+    If Not g_fso.FileExists(strFile) Then
+        DisplayMessage "File not found: " & strFile
+        Exit Function
+    End If
+
+    ' Start of with a reasonable size for the array:
+    ReDim vLines(500)
+
+    ' Open a TextStream Object to the file...
+    Set objTextStream = g_fso.OpenTextFile(strFile, 1, False)
+
+    ' Used for detecting comment lines, a regular expression object
+    Set re = New RegExp
+    re.Pattern = "(^[ \t]*(?:" & strComment & ")+.*$)|(^[ \t]+$)|(^$)"
+    re.Multiline = False
+    re.IgnoreCase = False
+
+    ' Now read in each line of the file and add an element to
+    ' the array for each line that isn't just spaces...
+    nLineCount = 0
+    nCommentLines = 0
+
+    Do While Not objTextStream.AtEndOfStream
+        strLine = ""
+
+        ' Find out if we need to make our array bigger yet
+        ' to accommodate all the lines in the file.  For large
+        ' files, this can be very memory-intensive.
+        If UBound(vLines) >= nLineCount Then
+            ReDim Preserve vLines(nLineCount + 5)
+        End If
+
+        strLine = Trim(objTextStream.ReadLine)
+
+        ' Look for comment lines that match the pattern
+        '   [whitespace][strComment]
+        If re.Test(strLine) Then
+            ' Line matches our comment pattern... ignore it
+            nCommentLines = nCommentLines + 1
+        Else
+            vLines(nLineCount) = strLine
+            nLineCount = nLineCount + 1
+        End If
+    Loop
+
+    objTextStream.Close
+
+    ReadDataFromFile = True
+End Function
+
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Function Connect(strConnectInfo)
+    ' Connect in a new tab to the host specified
+    bWaitForAuthToCompleteBeforeReturning = False
+    bLetCallerDetectAndHandleConnectionErrors = True
+    Set g_objNewTab = crt.Session.ConnectInTab( _
+        strConnectInfo, _
+        bWaitForAuthToCompleteBeforeReturning, _
+        bLetCallerDetectAndHandleConnectionErrors)
+        
+    If g_objNewTab.Session.Connected <> True Then
+        If crt.GetLastErrorMessage = "" Then
+            g_strError = "Unknown error"
+        Else
+            g_strError = crt.GetLastErrorMessage
+        End If
+        
+        ' You're not allowed to close the script tab (the tab in which the
+        ' script was launched originally), so only try if the new tab really
+        ' was a new tab -- not just reusing a disconnected tab.
+        If g_objNewTab.Index <> crt.GetScriptTab().Index Then g_objNewTab.Close
+        Exit Function
+    End If
+        
+    ' Make sure the new tab is "Synchronous" so we can properly wait/send/etc.
+    g_objNewTab.Screen.Synchronous = True
+    
+    ' Handle authentication in the new tab using the new tab's object reference
+    ' instead of 'crt'
+    nAuthTimeout = 10  ' seconds
+    
+    ' Modify the "$", the "]#", and/or the "->" in the array below to reflect
+    ' the variety of legitimate shell prompts you would expect to see when
+    ' authentication is successful to one of your remote machines.
+    vPossibleShellPrompts = Array(_
+        "ogin:", _
+        "name:", _
+        "sword:", _
+        "Login incorrect", _
+        "authentication failed.", _
+        "$",  _
+        "#", _
+        ">", _
+		")#")
+
+    Do
+        On Error Resume Next
+        g_objNewTab.Screen.WaitForStrings vPossibleShellPrompts, nAuthTimeout
+        nError = Err.Number
+        strErr = Err.Description
+        On Error Goto 0
+        ' Most likely if there was a problem here, it would have been caused by
+        ' an unexpected disconnect occurring while WaitForStrings() was running
+        ' as called above. If error, set the global description variable and
+        ' then exit the function.
+        If nError <> 0 Then
+            g_strError = Err.Description
+            
+            ' Ensure that the session is disconnected before we exit this
+            ' function. If there are subsequent hosts to loop through, we don't
+            ' want a connected tab interfering with the next host's connection
+            ' attempts
+            Do
+                g_objNewTab.Session.Disconnect
+                crt.Sleep 100
+            Loop While g_objNewTab.Session.Connected
+            
+            Exit Function
+        End If
+        
+        ' This Select..Case statement represents somewhat of a "state machine"
+        ' in which the value of Screen.MatchIndex represents the index of the
+        ' array of strings we told WaitForStrings() to look for.  Based on this
+        ' index, we know what action needs to be performed next.
+        Select Case g_objNewTab.Screen.MatchIndex
+            Case 0
+                g_strError = "Authentication timed out!" & vbcrlf & _
+                    "(Or you forgot to add a case for a successful shell " & _
+                    "prompt in the vPossibleShellPrompts array)"
+                ' Disconnect from the host so that we can reuse the disconnected
+                ' tab for the next connection in the loop
+                Do
+                    g_objNewTab.Session.Disconnect
+                    crt.Sleep 100
+                Loop While g_objNewTab.Session.Connected
+                
+                Exit Function
+                
+            Case 1,2 ' "ogin:", "name:"
+                ' Send the username
+                g_objNewTab.Screen.Send g_strUsername & vbcr
+                
+            Case 3 ' "sword:"
+                ' Send the password
+                g_objNewTab.Screen.Send g_strPassword & vbcr
+            
+            Case 4,5 ' "Login incorrect", "authentication failed."
+                g_strError = _
+                    "Password authentication to '" & g_strHost & "' as user '" & _
+                    g_strUsername & "' failed." & vbcrlf & vbcrlf & _
+                    "Please specify the correct password for user " & _
+                    "'" & g_strUsername & "'"
+                    
+                ' Disconnect from the host so that we can reuse the disconnected
+                ' tab for the next connection in the loop
+                Do
+                    g_objNewTab.Session.Disconnect
+                    crt.Sleep 100
+                Loop While g_objNewTab.Session.Connected
+                
+                Exit Function
+                
+            Case 6,7,8 ' "$", "#", or ">" <-- Shell prompt means auth success
+                g_objNewTab.Session.SetStatusText _
+                    "Connected to " & g_strHost & " as " & g_strUsername
+                Exit Do
+                
+            Case Else
+                g_strError = _
+                    "Ooops! Looks like you forgot to add code " & _
+                    "to handle this index: " & g_objNewTab.Screen.MatchIndex & _
+                    vbcrlf & _
+                    vbcrlf & _
+                    "Modify your script code's ""Select Case"" block " & _
+                    "to have 'Case' statements for all of the strings you " & _
+                    "are passing to the ""WaitForStrings"" method."
+                
+                Do
+                    g_objNewTab.Session.Disconnect
+                    crt.Sleep 100
+                Loop While g_objNewTab.Session.Connected
+                
+                Exit Function
+        End Select
+    Loop
+    
+    ' If the code gets here, then we must have been successful connecting and
+    ' authenticating to the remote machine; Assign True as the return value
+    ' for the Connect() function.
+    Connect = True
+End Function
+
+' -----------------------------------------------------------------------------
+Function WaitForScreenContentsToStopChanging(nMsDataReceiveWindow)
+    ' This function relies on new data received being different from the
+    ' data that was already received.  It won't work if, as one example, you
+    ' have a screenful of 'A's and more 'A's arrive (because one screen
+    ' "capture" will look exactly like the previous screen "capture").
+   
+    ' Store Synch flag for later restoration
+    bOrig = g_objNewTab.Screen.Synchronous
+    ' Turn Synch off since speed is of the essence; we'll turn it back on (if
+    ' it was already on) at the end of this function
+    g_objNewTab.Screen.Synchronous = False
+    
+    ' Be "safe" about trying to access Screen.Get().  If for any reason we
+    ' get disconnected, we don't want the script to error out on the problem
+    ' so we'll just return false and handle writing something to our log
+    ' file for this host.
+    On Error Resume Next
+        strLastScreen = g_objNewTab.Screen.Get(1,1,g_objNewTab.Screen.Rows,g_objNewTab.Screen.Columns)
+        nError = Err.Number
+        strErr = Err.Description
+    On Error Goto 0 
+    If nError <> 0 Then
+        g_strError = strErr
+        Exit Function
+    End If
+    Do
+        crt.Sleep nMsDataReceiveWindow
+        
+        ' Be "safe" about trying to access Screen.Get().  If for any reason we
+        ' get disconnected, we don't want the script to error out on the problem
+        ' so we'll just return false and handle writing something to our log
+        ' file for this host.
+        On Error Resume Next
+            strNewScreen = g_objNewTab.Screen.Get(1,1,g_objNewTab.Screen.Rows, g_objNewTab.Screen.Columns)
+            nError = Err.Number
+            strErr = Err.Description
+        On Error Goto 0 
+        If nError <> 0 Then
+            g_strError = strErr
+            Exit Function
+        End If
+        
+        If strNewScreen = strLastScreen Then Exit Do
+
+        strLastScreen = strNewScreen
+    Loop
+    
+    WaitForScreenContentsToStopChanging = True
+    ' Restore the Synch setting
+    g_objNewTab.Screen.Synchronous = bOrig
+End Function
+
+
+
+'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Function NN(nNumber)
+' Normalizes a single digit number into a double-digit number with a leading 0
+    If Len(nNumber) < 2 Then nNumber = "0" & nNumber
+    NN = nNumber
+End Function
+
+'-------------------------------------------------------------------------------
+Function PromptYesNo(strText)
+    PromptYesNo = crt.Dialog.MessageBox(strText, "SecureCRT", vbYesNo)
+End Function
+
+'-------------------------------------------------------------------------------
+Function DisplayMessage(strText)
+    crt.Dialog.MessageBox strText
+End Function
