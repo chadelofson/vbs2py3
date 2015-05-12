@@ -4,7 +4,7 @@ setup(
 
     name='vbs2py3',
     version='1.0',
-    py_modules=['vbs2py3','Tkinter'],
+    py_modules=['vbs2py3', 'Tkinter', 'pyad', 'os'],
 
     # metadata
     author=['Chad Elofson', 'Brad Henness'],
